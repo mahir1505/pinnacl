@@ -1,0 +1,239 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: [self-hosted]
+    concurrency:
+      group: deploy-staging-mcp
+      cancel-in-progress: false
+
+    # Expected supervisor config on the server:
+    #
+    # /etc/supervisor/conf.d/agentmemory-worker.conf
+    # [program:agentmemory-worker]
+    # command=php /var/www/stage-mcp.mahir.be/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+    # autostart=true
+    # autorestart=true
+    # user=www-data
+    # numprocs=1
+    # redirect_stderr=true
+    # stdout_logfile=/var/www/stage-mcp.mahir.be/storage/logs/worker.log
+    # stopwaitsecs=3600
+
+    steps:
+      # ---- 1. Pull latest code ----
+      - name: Checkout code
+        run: |
+          sudo git config --global --add safe.directory /var/www/stage-mcp.mahir.be
+          if [ ! -d /var/www/stage-mcp.mahir.be/.git ]; then
+            sudo git clone git@github.com:mahir-lokvancic/knowledgemcp.git /var/www/stage-mcp.mahir.be
+          fi
+          sudo git -C /var/www/stage-mcp.mahir.be fetch origin master
+          sudo git -C /var/www/stage-mcp.mahir.be reset --hard origin/master
+          sudo chown -R www-data:www-data /var/www/stage-mcp.mahir.be
+
+      # ---- 2. Pre-flight: ensure .env ----
+      - name: Ensure .env exists
+        run: |
+          if [ ! -f /var/www/stage-mcp.mahir.be/.env ]; then
+            sudo cp /var/www/stage-mcp.mahir.be/.env.example /var/www/stage-mcp.mahir.be/.env
+            sudo chown www-data:www-data /var/www/stage-mcp.mahir.be/.env
+            echo "::warning::.env created from .env.example — update DB credentials and other secrets on the server."
+          fi
+          CURRENT_KEY=$(grep -oP '^APP_KEY=\K.*' /var/www/stage-mcp.mahir.be/.env)
+          if [ -z "$CURRENT_KEY" ]; then
+            APP_KEY="base64:$(openssl rand -base64 32)"
+            sudo sed -i "s|^APP_KEY=.*|APP_KEY=${APP_KEY}|" /var/www/stage-mcp.mahir.be/.env
+            echo "::notice::APP_KEY was empty — generated a new one."
+          fi
+
+      # ---- 3. Maintenance mode ----
+      - name: Enable maintenance mode
+        run: sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan down --retry=10 --refresh=15 || true
+
+      # ---- 4. Composer install ----
+      - name: Install Composer dependencies
+        run: |
+          cd /var/www/stage-mcp.mahir.be
+          sudo -u www-data composer install \
+            --no-dev \
+            --no-interaction \
+            --prefer-dist \
+            --optimize-autoloader
+
+      # ---- 5. npm install ----
+      - name: Install npm dependencies
+        run: |
+          sudo rm -rf /var/www/stage-mcp.mahir.be/node_modules
+          sudo mkdir -p /var/www/.npm
+          sudo chown -R www-data:www-data /var/www/.npm
+          sudo -u www-data npm ci --cache /var/www/.npm
+        working-directory: /var/www/stage-mcp.mahir.be
+
+      # ---- 6. Build frontend ----
+      - name: Build frontend assets
+        run: sudo -u www-data npm run build
+        working-directory: /var/www/stage-mcp.mahir.be
+
+      # ---- 7. Migrations ----
+      - name: Run migrations
+        run: sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan migrate --force
+
+      # ---- 8. Cache framework ----
+      - name: Cache configuration
+        run: |
+          sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan config:cache
+          sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan route:cache
+          sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan view:cache
+          sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan event:cache
+
+      # ---- 9. Fix permissions ----
+      - name: Fix permissions
+        run: |
+          sudo chown -R www-data:www-data /var/www/stage-mcp.mahir.be/storage/
+          sudo chown -R www-data:www-data /var/www/stage-mcp.mahir.be/bootstrap/cache/
+          sudo chown -R www-data:www-data /var/www/stage-mcp.mahir.be/public/build/
+          sudo chmod -R 775 /var/www/stage-mcp.mahir.be/storage/
+          sudo chmod -R 775 /var/www/stage-mcp.mahir.be/bootstrap/cache/
+
+      # ---- 10. Ensure Apache vhost ----
+      - name: Ensure Apache vhost exists
+        run: |
+          if [ ! -f /etc/apache2/sites-available/stage-mcp.mahir.be.conf ]; then
+            sudo tee /etc/apache2/sites-available/stage-mcp.mahir.be.conf > /dev/null <<'VHOST'
+          <VirtualHost *:80>
+              ServerName stage-mcp.mahir.be
+
+              DocumentRoot /var/www/stage-mcp.mahir.be/public
+
+              # Cloudflare real IP restoration
+              RemoteIPHeader CF-Connecting-IP
+
+              # Security headers
+              Header always set X-Frame-Options "SAMEORIGIN"
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+              # PHP-FPM via proxy_fcgi
+              <FilesMatch \.php$>
+                  SetHandler "proxy:unix:/run/php/php8.3-fpm-agentmemory.sock|fcgi://localhost"
+              </FilesMatch>
+
+              # Document root directory
+              <Directory /var/www/stage-mcp.mahir.be/public>
+                  AllowOverride All
+                  Require all granted
+                  Options -Indexes +FollowSymLinks
+
+                  RewriteEngine On
+                  RewriteCond %{REQUEST_FILENAME} !-d
+                  RewriteCond %{REQUEST_FILENAME} !-f
+                  RewriteRule ^ index.php [L]
+              </Directory>
+
+              # MCP SSE endpoint
+              ProxyPreserveHost On
+              ProxyPass        "/mcp/" "http://127.0.0.1:8000/mcp/"
+              ProxyPassReverse "/mcp/" "http://127.0.0.1:8000/mcp/"
+
+              # Static assets: Vite build output (long-term caching)
+              <Directory /var/www/stage-mcp.mahir.be/public/build>
+                  <IfModule mod_expires.c>
+                      ExpiresActive On
+                      ExpiresDefault "access plus 1 year"
+                  </IfModule>
+                  Header set Cache-Control "public, immutable, max-age=31536000"
+              </Directory>
+
+              # Block dotfiles (except .well-known)
+              <DirectoryMatch "^\.|\/\.(?!well-known)">
+                  Require all denied
+              </DirectoryMatch>
+
+              # Request limits (MCP JSON-RPC payloads can be large)
+              LimitRequestBody 10485760
+
+              # Logging
+              ErrorLog  ${APACHE_LOG_DIR}/agentmemory-error.log
+              CustomLog ${APACHE_LOG_DIR}/agentmemory-access.log combined
+          </VirtualHost>
+          VHOST
+            sudo a2enmod rewrite headers remoteip proxy proxy_fcgi expires
+            sudo a2ensite stage-mcp.mahir.be.conf
+          fi
+
+      # ---- 10b. Ensure PHP-FPM pool ----
+      - name: Ensure PHP-FPM pool exists
+        run: |
+          if [ ! -f /etc/php/8.3/fpm/pool.d/agentmemory.conf ]; then
+            sudo tee /etc/php/8.3/fpm/pool.d/agentmemory.conf > /dev/null <<'FPM'
+          [agentmemory]
+          user = www-data
+          group = www-data
+          listen = /run/php/php8.3-fpm-agentmemory.sock
+          listen.owner = www-data
+          listen.group = www-data
+          listen.mode = 0660
+          pm = dynamic
+          pm.max_children = 10
+          pm.start_servers = 2
+          pm.min_spare_servers = 1
+          pm.max_spare_servers = 4
+          pm.max_requests = 500
+          php_admin_value[error_log] = /var/log/php8.3-fpm-agentmemory.log
+          php_admin_flag[log_errors] = on
+          FPM
+            echo "::notice::PHP-FPM pool agentmemory created."
+          fi
+
+      # ---- 11. Reload PHP-FPM + Apache ----
+      - name: Reload PHP-FPM and Apache
+        run: |
+          sudo service php8.3-fpm reload
+          sudo systemctl reload apache2
+
+      # ---- 11. Restart queue worker ----
+      - name: Restart queue worker
+        run: |
+          if ! sudo supervisorctl status agentmemory-worker &>/dev/null; then
+            sudo tee /etc/supervisor/conf.d/agentmemory-worker.conf > /dev/null <<'CONF'
+          [program:agentmemory-worker]
+          command=php /var/www/stage-mcp.mahir.be/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+          autostart=true
+          autorestart=true
+          user=www-data
+          numprocs=1
+          redirect_stderr=true
+          stdout_logfile=/var/www/stage-mcp.mahir.be/storage/logs/worker.log
+          stopwaitsecs=3600
+          CONF
+            sudo supervisorctl reread
+            sudo supervisorctl update
+          fi
+          sudo supervisorctl restart agentmemory-worker
+
+      # ---- 12. Disable maintenance mode ----
+      - name: Disable maintenance mode
+        run: sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan up
+
+      # ---- 13. Health check ----
+      - name: Health check
+        run: |
+          sleep 3
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost/up)
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Health check failed: HTTP $HTTP_CODE"
+            sudo -u www-data php /var/www/stage-mcp.mahir.be/artisan down --retry=10 --refresh=15 || true
+            exit 1
+          fi
+          echo "Health check passed: HTTP $HTTP_CODE"
+
+      # ---- 14. Verify services ----
+      - name: Verify supervisor services
+        run: sudo supervisorctl status

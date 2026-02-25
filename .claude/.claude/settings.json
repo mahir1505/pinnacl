@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(do php -l \"$f\")",
+      "Read(//c/xampp/php/**)",
+      "Bash(du:*)",
+      "Bash(# Check for any chart widgets find /c/xampp/www/knowledgemcp/app/Filament -name \"\"*Widget*\"\" -o -name \"\"*Chart*\"\")",
+      "Read(//c/xampp/www//**)",
+      "Bash(wc:*)",
+      "Bash(/c/xampp/php/php:*)",
+      "Read(//c/xampp/apache/conf/extra/**)",
+      "Bash(# Check what the browser actually receives and renders curl -s \"\"http://localhost:8099/\"\" 2>&1 | grep -oP ''data-page=\"\"[^\"\"]*\"\"'' | head -1 | python3 -c \"\"import sys,html,json; d=html.unescape\\(sys.stdin.read\\(\\).replace\\(''data-page=\\\\\"\"'',''''\\).rstrip\\(''\\\\\"\"''\\)\\); print\\(json.dumps\\(json.loads\\(d\\),indent=2\\)\\)\"\" || curl -s \"\"http://localhost:8099/\"\" 2>&1)",
+      "Read(//c//**)",
+      "Bash(# Restart server and verify nonce appears on script tags taskkill //F //IM \"\"php.exe\"\" sleep 1 cd c:/xampp/www/knowledgemcp && php artisan serve --port=8099 &>/dev/null & sleep 3 curl -s \"\"http://localhost:8099/\"\" 2>&1)"
+    ],
+    "additionalDirectories": [
+      "C:\\xampp\\php",
+      "\\tmp",
+      "c:\\tmp"
+    ]
+  }
+}
