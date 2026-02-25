@@ -11,7 +11,8 @@
       "Bash(php artisan --version)",
       "WebFetch(domain:stage-mcp.mahir.be)",
       "Read(//c/Users/Mahir/.claude/**)",
-      "Read(//c/Users/Mahir/**)"
+      "Read(//c/Users/Mahir/**)",
+      "Bash(xargs ls -la)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Mahir\\.claude\\projects\\c--xampp-www-pinnacl"
