@@ -8,7 +8,10 @@
       "Bash(npx vite build)",
       "Bash(ls -la /c/xampp/www/pinnacl/resources/js/*.tsx)",
       "Bash(composer require laravel/socialite)",
-      "Bash(php artisan --version)"
+      "Bash(php artisan --version)",
+      "WebFetch(domain:stage-mcp.mahir.be)",
+      "Read(//c/Users/Mahir/.claude/**)",
+      "Read(//c/Users/Mahir/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Mahir\\.claude\\projects\\c--xampp-www-pinnacl"
